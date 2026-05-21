@@ -92,8 +92,8 @@ async function fetchJSON(url, opts = {}, timeout = 15000, retries = 2) {
 
 // ── /health ───────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  res.json({ status:'ok', version:11, ts: new Date().toISOString(),
-    endpoints:['/health','/market-snapshot','/finnhub','/fred','/nyt',
+  res.json({ status:'ok', version:12, ts: new Date().toISOString(),
+    endpoints:['/health','/market-snapshot','/finnhub','/fred','/nyt','/guardian',
                '/newsapi','/gdelt','/polymarket','/opensky','/ais',
                '/rss','/oref','/ai','/cyber-feed','/military-feed','/pizzint','/fx','/firms','/cloudflare'] });
 });
@@ -195,12 +195,36 @@ app.get('/fred', auth, async (req, res) => {
 // ── /nyt ─────────────────────────────────────────────────────
 app.get('/nyt', auth, async (req, res) => {
   const key = process.env.NYT_API_KEY;
-  const ck = `nyt_${JSON.stringify(req.query)}`;
+  if (!key) return res.status(503).json({ error: 'NYT_API_KEY not configured' });
+  const { section, type, ...rest } = req.query;
+  const ck = `nyt_${section||'world'}_${type||'top'}`;
   const cached = getCached(ck);
   if (cached) return res.json(cached);
   try {
-    const params = new URLSearchParams({...req.query, 'api-key':key});
-    const data = await fetchJSON(`https://api.nytimes.com/svc/search/v2/articlesearch.json?${params}`);
+    let url;
+    if (type === 'search') {
+      const params = new URLSearchParams({ ...rest, 'api-key': key });
+      url = `https://api.nytimes.com/svc/search/v2/articlesearch.json?${params}`;
+    } else {
+      // top stories (default)
+      url = `https://api.nytimes.com/svc/topstories/v2/${section || 'world'}.json?api-key=${key}`;
+    }
+    const data = await fetchJSON(url);
+    setCached(ck, data, 900_000);
+    res.json(data);
+  } catch(e){ res.status(502).json({error:e.message}); }
+});
+
+// ── /guardian ─────────────────────────────────────────────────
+app.get('/guardian', auth, async (req, res) => {
+  const key = process.env.GUARDIAN_API_KEY;
+  if (!key) return res.status(503).json({ error: 'GUARDIAN_API_KEY not configured' });
+  const ck = `guardian_${JSON.stringify(req.query)}`;
+  const cached = getCached(ck);
+  if (cached) return res.json(cached);
+  try {
+    const params = new URLSearchParams({ ...req.query, 'api-key': key });
+    const data = await fetchJSON(`https://content.guardianapis.com/search?${params}`);
     setCached(ck, data, 900_000);
     res.json(data);
   } catch(e){ res.status(502).json({error:e.message}); }
