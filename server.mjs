@@ -3,6 +3,7 @@ import fetch   from 'node-fetch';
 //  ARKA Intelligence Center — Relay Server v18
 //  Rewrite limpio — Mar 2026 | Security hardening — May 2026
 //  v18: Rate limiter removido — seguridad via relay-secret + Origin check
+//       Fix: setCached typo en /firms (estaba como setCache → 502 siempre)
 // ============================================================
 import express from 'express';
 import cors    from 'cors';
@@ -341,7 +342,7 @@ app.get('/firms', auth, async (req, res) => {
     const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${NASA_KEY}/VIIRS_SNPP_NRT/world/1`;
     const resp = await fetch(url, { signal: AbortSignal.timeout(20000) });
     const text = await resp.text();
-    setCache(ck, { csv: text }, 10 * 60 * 1000); // caché 10 min
+    setCached(ck, { csv: text }, 10 * 60 * 1000); // caché 10 min
     res.json({ csv: text });
   } catch (e) {
     res.status(502).json({ error: e.message });
