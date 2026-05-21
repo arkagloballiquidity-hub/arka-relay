@@ -1,7 +1,7 @@
 import fetch   from 'node-fetch';
 // ============================================================
-//  ARKA Intelligence Center — Relay Server v9
-//  Rewrite limpio — Mar 2026
+//  ARKA Intelligence Center — Relay Server v11
+//  Rewrite limpio — Mar 2026 | Security hardening — May 2026
 // ============================================================
 import express from 'express';
 import cors    from 'cors';
@@ -33,6 +33,25 @@ function auth(req, res, next) {
   if (k !== SECRET) return res.status(401).json({ error:'Unauthorized' });
   next();
 }
+
+// ── Rate limiter (60 req/min por IP) ─────────────────────────
+const _rl = new Map();
+function rateLimit(req, res, next) {
+  const ip  = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const win = 60_000;
+  const max = 60;
+  let rec = _rl.get(ip);
+  if (!rec || now - rec.ts > win) { rec = { ts: now, count: 0 }; _rl.set(ip, rec); }
+  rec.count++;
+  if (rec.count > max) return res.status(429).json({ error: 'Too many requests — limit 60/min per IP' });
+  next();
+}
+// Aplica rate limit global a todas las rutas autenticadas
+app.use((req, res, next) => {
+  if (req.path === '/health') return next();
+  rateLimit(req, res, next);
+});
 
 // ── In-memory cache ───────────────────────────────────────────
 const cache = new Map();
@@ -73,10 +92,10 @@ async function fetchJSON(url, opts = {}, timeout = 15000, retries = 2) {
 
 // ── /health ───────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  res.json({ status:'ok', version:10, ts: new Date().toISOString(),
+  res.json({ status:'ok', version:11, ts: new Date().toISOString(),
     endpoints:['/health','/market-snapshot','/finnhub','/fred','/nyt',
                '/newsapi','/gdelt','/polymarket','/opensky','/ais',
-               '/rss','/oref','/ai','/cyber-feed','/military-feed','/pizzint','/fx','/firms'] });
+               '/rss','/oref','/ai','/cyber-feed','/military-feed','/pizzint','/fx','/firms','/cloudflare'] });
 });
 
 // ── /market-snapshot ─────────────────────────────────────────
@@ -290,7 +309,26 @@ app.get('/firms', auth, async (req, res) => {
   }
 });
 
-
+// ── /cloudflare — Cloudflare Radar Internet Outages ──────────
+app.get('/cloudflare', auth, async (req, res) => {
+  const CF_KEY = process.env.CLOUDFLARE_API_TOKEN;
+  if (!CF_KEY) return res.status(503).json({ error: 'CLOUDFLARE_API_TOKEN not configured' });
+  const ck = 'cf_radar_netflows';
+  const cached = getCached(ck);
+  if (cached) return res.json(cached);
+  try {
+    const r = await fetch(
+      'https://api.cloudflare.com/client/v4/radar/netflows/timeseries?aggInterval=1h&dateRange=24h',
+      { headers: { Authorization: `Bearer ${CF_KEY}`, 'Content-Type': 'application/json' } }
+    );
+    if (!r.ok) throw new Error(`Cloudflare ${r.status}`);
+    const data = await r.json();
+    setCached(ck, data, 5 * 60 * 1000); // caché 5 min
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
 
 // ── /economic-calendar ────────────────────────────────────────
 // Mapa release_id → series_id para los releases más importantes
