@@ -1,6 +1,6 @@
 import fetch   from 'node-fetch';
 // ============================================================
-//  ARKA Intelligence Center — Relay Server v16
+//  ARKA Intelligence Center — Relay Server v17
 //  Rewrite limpio — Mar 2026 | Security hardening — May 2026
 // ============================================================
 import express from 'express';
@@ -57,20 +57,21 @@ function auth(req, res, next) {
   next();
 }
 
-// ── Rate limiter (300 req/min por IP) ────────────────────────
-// La app hace ~40 calls en carga inicial + refreshes cada 30s.
-// 300/min permite uso normal sin problemas. La seguridad real
-// viene del relay-secret + Origin check, no del rate limiter.
+// ── Rate limiter (2000 req/min por IP) ───────────────────────
+// La seguridad real viene del relay-secret + Origin check.
+// El rate limiter solo protege contra abuso extremo.
+// 2000/min = ~33/s — suficiente para cargas normales de la app
+// (40 en carga inicial + refreshes cada 30s × múltiples panels).
 const _rl = new Map();
 function rateLimit(req, res, next) {
   const ip  = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
   const now = Date.now();
   const win = 60_000;
-  const max = 300;
+  const max = 2000;
   let rec = _rl.get(ip);
   if (!rec || now - rec.ts > win) { rec = { ts: now, count: 0 }; _rl.set(ip, rec); }
   rec.count++;
-  if (rec.count > max) return res.status(429).json({ error: 'Too many requests — limit 300/min per IP' });
+  if (rec.count > max) return res.status(429).json({ error: 'Too many requests — limit 2000/min per IP' });
   next();
 }
 // Aplica rate limit global a todas las rutas autenticadas
@@ -118,7 +119,7 @@ async function fetchJSON(url, opts = {}, timeout = 15000, retries = 2) {
 
 // ── /health ───────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  res.json({ status:'ok', version:16, ts: new Date().toISOString(),
+  res.json({ status:'ok', version:17, ts: new Date().toISOString(),
     endpoints:['/health','/market-snapshot','/finnhub','/fred','/nyt','/guardian',
                '/newsapi','/gdelt','/polymarket','/opensky','/ais',
                '/rss','/oref','/ai','/cyber-feed','/military-feed','/pizzint','/fx','/firms','/cloudflare'] });
@@ -993,5 +994,5 @@ app.post('/api/chat', quantAuth, async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`ARKA Relay v10 on :${PORT} | Auth:${SECRET?'ON':'OFF'}`);
+  console.log(`ARKA Relay v17 on :${PORT} | Auth:${SECRET?'ON':'OFF'}`);
 });
