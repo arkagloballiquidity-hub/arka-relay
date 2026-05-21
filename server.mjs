@@ -1,9 +1,12 @@
 import fetch   from 'node-fetch';
 // ============================================================
-//  ARKA Intelligence Center — Relay Server v18
+//  ARKA Intelligence Center — Relay Server v19
 //  Rewrite limpio — Mar 2026 | Security hardening — May 2026
 //  v18: Rate limiter removido — seguridad via relay-secret + Origin check
 //       Fix: setCached typo en /firms (estaba como setCache → 502 siempre)
+//  v19: /market-snapshot expandido: futures (GC=F,BZ=F,CL=F,NG=F,SI=F,HG=F,ZW=F),
+//       índices (DX-Y.NYB,DIA,IWM,EWJ,FXI,EWZ,EWW) — cubre todo el SYMBOL_CATALOG
+//       Frontend migrado a snapshot-only (0 individual /finnhub calls)
 // ============================================================
 import express from 'express';
 import cors    from 'cors';
@@ -104,7 +107,7 @@ async function fetchJSON(url, opts = {}, timeout = 15000, retries = 2) {
 
 // ── /health ───────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  res.json({ status:'ok', version:18, ts: new Date().toISOString(),
+  res.json({ status:'ok', version:19, ts: new Date().toISOString(),
     endpoints:['/health','/market-snapshot','/finnhub','/fred','/nyt','/guardian',
                '/newsapi','/gdelt','/polymarket','/opensky','/ais',
                '/rss','/oref','/ai','/cyber-feed','/military-feed','/pizzint','/fx','/firms','/cloudflare'] });
@@ -120,8 +123,16 @@ app.get('/market-snapshot', auth, async (req, res) => {
     const key = process.env.FINNHUB_API_KEY;
     // Stocks & ETFs (Finnhub /quote)
     const stockSyms = [
+      // Tech / large-cap stocks
       'AAPL','MSFT','GOOGL','AMZN','TSLA','NVDA','META','TSM',
-      'SPY','QQQ','GLD','TLT','XLF','USO','UNG','SLV','DBB',
+      // ETFs — US índices + internacionales (cubre SYMBOL_CATALOG)
+      'SPY','QQQ','DIA','IWM','EWJ','FXI','EWZ','EWW',
+      // ETFs — commodities, bonds, sector
+      'GLD','TLT','XLF','USO','UNG','SLV','DBB',
+      // Commodity futures (GC=Gold, BZ=Brent, CL=WTI, NG=NatGas, SI=Silver, HG=Copper, ZW=Wheat)
+      'GC=F','BZ=F','CL=F','NG=F','SI=F','HG=F','ZW=F',
+      // Índices adicionales
+      'DX-Y.NYB',
     ];
     // Crypto via Binance on Finnhub
     const cryptoSyms = [
@@ -979,5 +990,5 @@ app.post('/api/chat', quantAuth, async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`ARKA Relay v18 on :${PORT} | Auth:${SECRET?'ON':'OFF'} | RateLimit:OFF`);
+  console.log(`ARKA Relay v19 on :${PORT} | Auth:${SECRET?'ON':'OFF'} | RateLimit:OFF`);
 });
