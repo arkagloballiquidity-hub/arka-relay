@@ -1,12 +1,22 @@
 import fetch   from 'node-fetch';
 // ============================================================
-//  ARKA Intelligence Center — Relay Server v19
+//  ARKA Intelligence Center — Relay Server v20
 //  Rewrite limpio — Mar 2026 | Security hardening — May 2026
 //  v18: Rate limiter removido — seguridad via relay-secret + Origin check
 //       Fix: setCached typo en /firms (estaba como setCache → 502 siempre)
-//  v19: /market-snapshot expandido: futures (GC=F,BZ=F,CL=F,NG=F,SI=F,HG=F,ZW=F),
-//       índices (DX-Y.NYB,DIA,IWM,EWJ,FXI,EWZ,EWW) — cubre todo el SYMBOL_CATALOG
+//  v19: /market-snapshot expandido — cubre todo el SYMBOL_CATALOG
 //       Frontend migrado a snapshot-only (0 individual /finnhub calls)
+//  v20: Security hardening:
+//       - CORS: wildcard *.vercel.app → solo arka-intelligence*.vercel.app
+//       - /health: eliminar lista de endpoints del response
+//       - /finnhub: whitelist de paths permitidos + sanitizar query params
+//       - /newsapi, /guardian, /fred: whitelist de params + FRED series allowlist
+//       - /rss: SSRF fix — allowlist de dominios RSS autorizados
+//       - /ai: clamp max_tokens (50–1000), limitar mensajes, sanitizar roles
+//       - quantAuth: eliminar bypass "dev mode sin key"
+//       - /firms: eliminar NASA key hardcodeada del source
+//       - pizzint: eliminar console.log de debug
+//       - cache: límite de 500 entradas + eviction FIFO anti-OOM
 // ============================================================
 import express from 'express';
 import cors    from 'cors';
@@ -19,11 +29,8 @@ const PORT   = process.env.PORT || 3001;
 app.use(cors({
   origin: [
     /^https?:\/\/localhost(:\d+)?$/,
-    /^https:\/\/.*\.vercel\.app$/,
-    /^https:\/\/.*\.up\.railway\.app$/,
-    /^https:\/\/arka-intelligence\.vercel\.app$/,
-    /^https:\/\/.*\.arkaltd\.io$/,
-    /^https:\/\/world\.arkaltd\.io$/,
+    /^https:\/\/arka-intelligence(-[a-z0-9]+)?\.vercel\.app$/,  // solo deployments ARKA
+    /^https:\/\/[a-z0-9-]+\.arkaltd\.io$/,
   ],
   methods: ['GET','POST','OPTIONS'],
   allowedHeaders: ['Content-Type','x-relay-key','Authorization'],
@@ -68,8 +75,9 @@ function auth(req, res, next) {
 // (múltiples paneles React montando simultáneamente = >2000 req/min
 // desde la misma IP de Vercel). No hay necesidad de limitarlo aquí.
 
-// ── In-memory cache ───────────────────────────────────────────
+// ── In-memory cache (máx 500 entradas para evitar OOM) ──────────
 const cache = new Map();
+const CACHE_MAX = 500;
 function getCached(k) {
   const e = cache.get(k);
   if (!e) return null;
@@ -77,6 +85,15 @@ function getCached(k) {
   return e.data;
 }
 function setCached(k, data, ttlMs = 300_000) {
+  // Evict oldest entries si se supera el límite
+  if (cache.size >= CACHE_MAX) {
+    const now = Date.now();
+    for (const [key, val] of cache) {
+      if (now > val.exp) { cache.delete(key); break; }
+    }
+    // Si sigue lleno, eliminar el primero (FIFO)
+    if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
+  }
   cache.set(k, { data, exp: Date.now() + ttlMs });
 }
 
@@ -107,10 +124,7 @@ async function fetchJSON(url, opts = {}, timeout = 15000, retries = 2) {
 
 // ── /health ───────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  res.json({ status:'ok', version:19, ts: new Date().toISOString(),
-    endpoints:['/health','/market-snapshot','/finnhub','/fred','/nyt','/guardian',
-               '/newsapi','/gdelt','/polymarket','/opensky','/ais',
-               '/rss','/oref','/ai','/cyber-feed','/military-feed','/pizzint','/fx','/firms','/cloudflare'] });
+  res.json({ status:'ok', version:20, ts: new Date().toISOString() });
 });
 
 // ── /market-snapshot ─────────────────────────────────────────
@@ -177,16 +191,30 @@ app.get('/market-snapshot', auth, async (req, res) => {
 });
 
 // ── /finnhub ─────────────────────────────────────────────────
+// Paths permitidos — whitelist explícita para evitar abuso de quota
+const FINNHUB_ALLOWED_PATHS = new Set([
+  'quote', 'news', 'company-news', 'recommendation-trends',
+  'basic-financials', 'stock/symbol', 'search', 'crypto/candle',
+]);
 app.get('/finnhub', auth, async (req, res) => {
   const key = process.env.FINNHUB_API_KEY;
-  const { path: p='quote', ...rest } = req.query;
-  const ck = `finnhub_${p}_${JSON.stringify(rest)}`;
+  const { path: p='quote', symbol, ...rest } = req.query;
+  if (!FINNHUB_ALLOWED_PATHS.has(p)) {
+    return res.status(400).json({ error: 'Finnhub path not allowed' });
+  }
+  // Construir params solo con campos conocidos para evitar query injection
+  const safeParams = { token: key };
+  if (symbol) safeParams.symbol = symbol;
+  if (rest.from)   safeParams.from   = rest.from;
+  if (rest.to)     safeParams.to     = rest.to;
+  if (rest.count)  safeParams.count  = rest.count;
+  if (rest.metric) safeParams.metric = rest.metric;
+  const ck = `finnhub_${p}_${symbol||''}`;
   const cached = getCached(ck);
   if (cached) return res.json(cached);
-  const params = new URLSearchParams({...rest, token:key});
   try {
-    const data = await fetchJSON(`https://finnhub.io/api/v1/${p}?${params}`);
-    setCached(ck, data, 60_000); // 60s cache — alinea con TTL de markets en frontend
+    const data = await fetchJSON(`https://finnhub.io/api/v1/${p}?${new URLSearchParams(safeParams)}`);
+    setCached(ck, data, 60_000);
     res.json(data);
   } catch(e){ res.status(502).json({error:e.message}); }
 });
@@ -206,13 +234,31 @@ app.get('/alphavantage', auth, async (req, res) => {
 });
 
 // ── /fred ─────────────────────────────────────────────────────
+// Whitelist de series permitidas para evitar acceso arbitrario a FRED
+const FRED_ALLOWED_SERIES = new Set([
+  'FEDFUNDS','CPIAUCSL','A191RL1Q225SBEA','UNRATE','GDP','PCEPILFE',
+  'RSAFS','INDPRO','CPILFESL','ISMPMI','HOUST','PPIFGS','PAYEMS',
+  'PPIACO','BOPGSTB','DGORDER','CP','GAUTHMPMI','DGS10','DGS2','DGS30',
+  'T10Y2Y','VIXCLS','DCOILWTICO','DCOILBRENTEU','GOLDAMGBD228NLBM',
+]);
 app.get('/fred', auth, async (req, res) => {
   const key = process.env.FRED_API_KEY;
-  const ck = `fred_${JSON.stringify(req.query)}`;
+  const { series_id, limit, sort_order, units, realtime_start, observation_end } = req.query;
+  if (series_id && !FRED_ALLOWED_SERIES.has(series_id)) {
+    return res.status(400).json({ error: 'FRED series not in allowlist' });
+  }
+  const safeQ = { api_key: key, file_type: 'json' };
+  if (series_id)       safeQ.series_id       = series_id;
+  if (limit)           safeQ.limit           = Math.min(parseInt(limit)||13, 100);
+  if (sort_order)      safeQ.sort_order      = sort_order === 'asc' ? 'asc' : 'desc';
+  if (units)           safeQ.units           = String(units).replace(/[^a-z0-9_]/gi, '').slice(0, 20);
+  if (realtime_start)  safeQ.realtime_start  = String(realtime_start).slice(0, 10);
+  if (observation_end) safeQ.observation_end = String(observation_end).slice(0, 10);
+  const ck = `fred_${series_id}_${units||''}`;
   const cached = getCached(ck);
   if (cached) return res.json(cached);
   try {
-    const params = new URLSearchParams({...req.query, api_key:key, file_type:'json'});
+    const params = new URLSearchParams(safeQ);
     const data = await fetchJSON(`https://api.stlouisfed.org/fred/series/observations?${params}`);
     setCached(ck, data, 3600_000);
     res.json(data);
@@ -246,11 +292,16 @@ app.get('/nyt', auth, async (req, res) => {
 app.get('/guardian', auth, async (req, res) => {
   const key = process.env.GUARDIAN_API_KEY;
   if (!key) return res.status(503).json({ error: 'GUARDIAN_API_KEY not configured' });
-  const ck = `guardian_${JSON.stringify(req.query)}`;
+  const { section, q, tag } = req.query;
+  const safeQ = { 'page-size': '8', 'show-fields': 'trailText', 'order-by': 'newest', 'api-key': key };
+  if (section) safeQ.section = String(section).replace(/[^a-z0-9\/-]/gi, '').slice(0, 100);
+  if (q)       safeQ.q       = String(q).slice(0, 300);
+  if (tag)     safeQ.tag     = String(tag).slice(0, 100);
+  const ck = `guardian_${JSON.stringify({ section, q, tag })}`;
   const cached = getCached(ck);
   if (cached) return res.json(cached);
   try {
-    const params = new URLSearchParams({ ...req.query, 'api-key': key });
+    const params = new URLSearchParams(safeQ);
     const data = await fetchJSON(`https://content.guardianapis.com/search?${params}`);
     setCached(ck, data, 900_000);
     res.json(data);
@@ -260,11 +311,19 @@ app.get('/guardian', auth, async (req, res) => {
 // ── /newsapi ─────────────────────────────────────────────────
 app.get('/newsapi', auth, async (req, res) => {
   const key = process.env.NEWSAPI_KEY;
-  const ck = `newsapi_${JSON.stringify(req.query)}`;
+  // Whitelist de params para evitar query injection
+  const { q, pageSize, sortBy, language, domains, from, to } = req.query;
+  const safeQ = { sortBy: sortBy || 'publishedAt', language: language || 'en' };
+  if (q)         safeQ.q        = String(q).slice(0, 500);
+  if (pageSize)  safeQ.pageSize = Math.min(parseInt(pageSize)||8, 20);
+  if (domains)   safeQ.domains  = String(domains).slice(0, 200);
+  if (from)      safeQ.from     = String(from).slice(0, 10);
+  if (to)        safeQ.to       = String(to).slice(0, 10);
+  const ck = `newsapi_${JSON.stringify(safeQ)}`;
   const cached = getCached(ck);
   if (cached) return res.json(cached);
   try {
-    const params = new URLSearchParams(req.query);
+    const params = new URLSearchParams(safeQ);
     const data = await fetchJSON(`https://newsapi.org/v2/everything?${params}`,
       { headers:{'X-Api-Key':key} });
     setCached(ck, data, 600_000);
@@ -335,8 +394,7 @@ app.get('/pizzint', auth, async (req, res) => {
         const raw = html.slice(c1 + COMM_KEY.length, c2);
         commute = JSON.parse(raw.replace(/\\\\"/g, '"'));
       }
-    } catch(parseErr) { console.error('pizzint parse error:', parseErr.message); }
-    console.log('pizzint debug - d1:', html.indexOf('\\"initialDoomsdayData\\":'), 'html_len:', html.length);
+    } catch(parseErr) { /* parse silently */ }
         const data = { doomsday, commute, ts: Date.now() };
     setCached(ck, data, 300_000); // caché 5 min
     res.json(data);
@@ -345,7 +403,8 @@ app.get('/pizzint', auth, async (req, res) => {
 
 // ── /firms ───────────────────────────────────────────────────
 app.get('/firms', auth, async (req, res) => {
-  const NASA_KEY = process.env.NASA_FIRMS_KEY || '98e3b5113209d4813a6e82eda1dc0bea';
+  const NASA_KEY = process.env.NASA_FIRMS_KEY;
+  if (!NASA_KEY) return res.status(503).json({ error: 'NASA_FIRMS_KEY not configured' });
   const ck = 'firms_fires';
   const cached = getCached(ck);
   if (cached) return res.json(cached);
@@ -632,14 +691,32 @@ app.get('/ais', auth, async (req, res) => {
 });
 
 // ── /rss ─────────────────────────────────────────────────────
+// Allowlist de dominios RSS autorizados — previene SSRF
+const RSS_ALLOWED_HOSTS = new Set([
+  'feeds.bbci.co.uk', 'feeds.reuters.com', 'rss.cnn.com',
+  'www.ft.com', 'feeds.ft.com', 'www.economist.com',
+  'foreignpolicy.com', 'feeds.feedburner.com',
+  'rss.nytimes.com', 'feeds.theguardian.com',
+  'allafrica.com', 'feeds.washingtonpost.com',
+  'news.un.org', 'reliefweb.int', 'www.iaea.org',
+  'www.worldbank.org', 'blog.imf.org',
+]);
 app.get('/rss', auth, async (req, res) => {
   const { url } = req.query;
-  if (!url) return res.status(400).json({error:'url required'});
+  if (!url) return res.status(400).json({ error: 'url required' });
+  let parsedUrl;
+  try { parsedUrl = new URL(url); } catch { return res.status(400).json({ error: 'Invalid URL' }); }
+  if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+    return res.status(400).json({ error: 'Only http/https URLs allowed' });
+  }
+  if (!RSS_ALLOWED_HOSTS.has(parsedUrl.hostname)) {
+    return res.status(403).json({ error: 'RSS host not in allowlist' });
+  }
   const ck = `rss_${url}`;
   const cached = getCached(ck);
   if (cached) return res.json(cached);
   try {
-    const r = await fetch(url, { headers:{'User-Agent':'ARKARelay/7.0','Accept':'application/rss+xml,application/xml,text/xml,*/*'} });
+    const r = await fetch(url, { headers:{'User-Agent':'ARKARelay/7.0','Accept':'application/rss+xml,application/xml,text/xml,*/*'}, signal: AbortSignal.timeout(15000) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const text = await r.text();
     setCached(ck, { xml: text }, 900_000);
@@ -691,14 +768,21 @@ app.get('/military-feed', auth, async (req, res) => {
 
 // ── /ai ───────────────────────────────────────────────────────
 app.post('/ai', auth, async (req, res) => {
-  const { messages, max_tokens=400 } = req.body || {};
-  if (!messages || !Array.isArray(messages)) {
-    return res.status(400).json({ error:'messages array required', got: typeof messages });
+  const { messages, max_tokens } = req.body || {};
+  if (!messages || !Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error:'messages array required' });
   }
+  // Clamp max_tokens: 50–1000, default 400. Previene quema de quota con valores arbitrarios
+  const safeTokens = Math.min(Math.max(parseInt(max_tokens) || 400, 50), 1000);
+  // Limitar contenido de mensajes para evitar inyección de prompts excesivamente largos
+  const safeMessages = messages.slice(0, 10).map(m => ({
+    role: ['user','assistant','system'].includes(m.role) ? m.role : 'user',
+    content: String(m.content || '').slice(0, 4000),
+  }));
   const key = process.env.GROQ_API_KEY;
   if (!key) return res.status(503).json({ error:'GROQ_API_KEY not configured' });
 
-  const ck = 'ai_' + Buffer.from(messages.map(m=>m.content).join('|')).toString('base64').slice(0,32);
+  const ck = 'ai_' + Buffer.from(safeMessages.map(m=>m.content).join('|')).toString('base64').slice(0,32);
   const cached = getCached(ck);
   if (cached) return res.json(cached);
 
@@ -706,7 +790,7 @@ app.post('/ai', auth, async (req, res) => {
     const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method:'POST',
       headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${key}` },
-      body: JSON.stringify({ model:'llama-3.3-70b-versatile', messages, max_tokens, temperature:0.3 }),
+      body: JSON.stringify({ model:'llama-3.3-70b-versatile', messages: safeMessages, max_tokens: safeTokens, temperature:0.3 }),
     });
     if (r.status===429) return res.status(429).json({error:'Groq rate limited'});
     if (!r.ok) throw new Error(`Groq ${r.status}`);
@@ -726,7 +810,9 @@ app.post('/ai', auth, async (req, res) => {
 // ── Quant auth middleware ─────────────────────────────────────
 function quantAuth(req, res, next) {
   const QKEY = process.env.ARKA_API_KEY;
-  if (!QKEY) return next(); // dev mode: sin key requerida
+  // Si ARKA_API_KEY no está configurada, los endpoints quant quedan DESHABILITADOS
+  // (el bypass dev-mode fue eliminado en v20 — riesgo de exposición accidental)
+  if (!QKEY) return res.status(503).json({ error: 'Quant endpoints not configured' });
   const hdr = (req.headers['authorization'] || '').replace('Bearer ', '');
   if (hdr !== QKEY) return res.status(401).json({ error: 'Unauthorized' });
   next();
@@ -990,5 +1076,5 @@ app.post('/api/chat', quantAuth, async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`ARKA Relay v19 on :${PORT} | Auth:${SECRET?'ON':'OFF'} | RateLimit:OFF`);
+  console.log(`ARKA Relay v20 on :${PORT} | Auth:${SECRET?'ON':'OFF'} | RateLimit:OFF | Security:HARDENED`);
 });
