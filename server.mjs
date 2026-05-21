@@ -1,6 +1,6 @@
 import fetch   from 'node-fetch';
 // ============================================================
-//  ARKA Intelligence Center — Relay Server v11
+//  ARKA Intelligence Center — Relay Server v13
 //  Rewrite limpio — Mar 2026 | Security hardening — May 2026
 // ============================================================
 import express from 'express';
@@ -26,11 +26,34 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json());
 
+// ── Allowed origins (Origin/Referer check) ────────────────────
+const ALLOWED_ORIGINS = [
+  /^https?:\/\/localhost(:\d+)?$/,
+  /^https:\/\/arka-intelligence\.vercel\.app$/,
+  /^https:\/\/arka-intelligence-[a-z0-9-]+\.vercel\.app$/,
+  /^https:\/\/[a-z0-9-]+\.arkaltd\.io$/,
+];
+function originAllowed(req) {
+  const o = req.headers['origin'] || req.headers['referer'] || '';
+  if (!o) return false; // sin origen → rechazar (no es browser)
+  try {
+    const base = new URL(o).origin; // normaliza — quita path del referer
+    return ALLOWED_ORIGINS.some(re => re.test(base));
+  } catch { return false; }
+}
+
 // ── Auth middleware ───────────────────────────────────────────
 function auth(req, res, next) {
-  if (!SECRET) return next();
-  const k = req.headers['x-relay-key'] || (req.headers.authorization||'').replace('Bearer ','');
-  if (k !== SECRET) return res.status(401).json({ error:'Unauthorized' });
+  // 1. Verifica relay secret
+  if (SECRET) {
+    const k = req.headers['x-relay-key'] || (req.headers.authorization||'').replace('Bearer ','');
+    if (k !== SECRET) return res.status(401).json({ error:'Unauthorized' });
+  }
+  // 2. Verifica Origin/Referer — bloquea uso desde dominios no autorizados
+  //    aunque alguien extraiga el secret del bundle JS no puede usarlo fuera de los dominios ARKA
+  if (!originAllowed(req)) {
+    return res.status(403).json({ error:'Forbidden origin' });
+  }
   next();
 }
 
@@ -92,7 +115,7 @@ async function fetchJSON(url, opts = {}, timeout = 15000, retries = 2) {
 
 // ── /health ───────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  res.json({ status:'ok', version:12, ts: new Date().toISOString(),
+  res.json({ status:'ok', version:13, ts: new Date().toISOString(),
     endpoints:['/health','/market-snapshot','/finnhub','/fred','/nyt','/guardian',
                '/newsapi','/gdelt','/polymarket','/opensky','/ais',
                '/rss','/oref','/ai','/cyber-feed','/military-feed','/pizzint','/fx','/firms','/cloudflare'] });
