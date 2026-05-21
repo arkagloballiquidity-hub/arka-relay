@@ -1,6 +1,6 @@
 import fetch   from 'node-fetch';
 // ============================================================
-//  ARKA Intelligence Center — Relay Server v13
+//  ARKA Intelligence Center — Relay Server v14
 //  Rewrite limpio — Mar 2026 | Security hardening — May 2026
 // ============================================================
 import express from 'express';
@@ -115,7 +115,7 @@ async function fetchJSON(url, opts = {}, timeout = 15000, retries = 2) {
 
 // ── /health ───────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  res.json({ status:'ok', version:13, ts: new Date().toISOString(),
+  res.json({ status:'ok', version:14, ts: new Date().toISOString(),
     endpoints:['/health','/market-snapshot','/finnhub','/fred','/nyt','/guardian',
                '/newsapi','/gdelt','/polymarket','/opensky','/ais',
                '/rss','/oref','/ai','/cyber-feed','/military-feed','/pizzint','/fx','/firms','/cloudflare'] });
@@ -414,7 +414,7 @@ const RELEASE_BY_NAME = {
 };
 
 app.get('/economic-calendar', auth, async (req, res) => {
-  const ck = 'econ_calendar_v5';
+  const ck = 'econ_calendar_v6';
   const cached = getCached(ck);
   if (cached) return res.json(cached);
   try {
@@ -423,23 +423,28 @@ app.get('/economic-calendar', auth, async (req, res) => {
     const todayStr = today.toISOString().slice(0,10);
     const from = todayStr;
     const to = new Date(today.getTime() + 14*24*60*60*1000).toISOString().slice(0,10);
-    
+
+    // FRED releases/dates: no usar realtime_start/end (filtra por cuándo FRED
+    // registró el dato, no por cuándo se publica). Pedimos los últimos 200
+    // release dates y filtramos los que caen en los próximos 14 días.
     const params = new URLSearchParams({
-      realtime_start: from, realtime_end: to,
       api_key: key, file_type: 'json',
-      limit: '50', sort_order: 'asc', order_by: 'release_date'
+      limit: '200', sort_order: 'asc', order_by: 'release_date',
+      include_release_dates_with_no_data: 'true',
     });
     const data = await fetchJSON(`https://api.stlouisfed.org/fred/releases/dates?${params}`, {}, 30000);
     
     const HIGH = ['GDP','CPI','Employment','Nonfarm','Federal Funds','PCE','Retail Sales','PPI','Housing Starts','ISM'];
     const MED  = ['PMI','Trade','Industrial','Consumer','Producer','Durable','Treasury','Manufacturing'];
     
-    const events = (data.release_dates || []).map(r => {
-      const imp = HIGH.some(k => r.release_name.includes(k)) ? 3 :
-                  MED.some(k => r.release_name.includes(k)) ? 2 : 1;
-      const released = r.date <= todayStr;
-      return { date: r.date, name: r.release_name, importance: imp, id: r.release_id, released };
-    }).sort((a,b) => new Date(a.date) - new Date(b.date));
+    const events = (data.release_dates || [])
+      .filter(r => r.date >= from && r.date <= to)   // solo próximos 14 días
+      .map(r => {
+        const imp = HIGH.some(k => r.release_name.includes(k)) ? 3 :
+                    MED.some(k => r.release_name.includes(k)) ? 2 : 1;
+        const released = r.date <= todayStr;
+        return { date: r.date, name: r.release_name, importance: imp, id: r.release_id, released };
+      }).sort((a,b) => new Date(a.date) - new Date(b.date));
 
     // Enriquecer eventos con valor actual + histórico para los releases mapeados
     const enriched = await Promise.allSettled(
