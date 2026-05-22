@@ -691,7 +691,8 @@ app.get('/ais', auth, async (req, res) => {
     const apiKey = process.env.AISSTREAM_API_KEY;
     // AISStream REST snapshot — últimos 200 vessels activos
     const data = await fetchJSON(
-      `https://api.aisstream.io/v0/vessel/location?apiKey=${apiKey}&limit=200`
+      `https://api.aisstream.io/v0/vessel/location?limit=200`,
+      { headers: { 'X-Api-Key': apiKey } }
     );
     setCached(ck, data, 120_000);
     res.json(data);
