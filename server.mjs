@@ -220,13 +220,15 @@ app.get('/finnhub', auth, async (req, res) => {
 });
 
 // ── /alphavantage ────────────────────────────────────────────
+const AV_ALLOWED = new Set(['function','symbol','market','interval','time_period','series_type','from_currency','to_currency','outputsize','datatype','keywords','month']);
 app.get('/alphavantage', auth, async (req, res) => {
   const key = process.env.ALPHA_VANTAGE_KEY;
   const ck = `av_${JSON.stringify(req.query)}`;
   const cached = getCached(ck);
   if (cached) return res.json(cached);
   try {
-    const params = new URLSearchParams({...req.query, apikey:key});
+    const safe = Object.fromEntries(Object.entries(req.query).filter(([k])=>AV_ALLOWED.has(k)));
+    const params = new URLSearchParams({...safe, apikey:key});
     const data = await fetchJSON(`https://www.alphavantage.co/query?${params}`);
     setCached(ck, data, 240_000); // 4 min cache (respeta rate limits del free plan)
     res.json(data);
@@ -276,7 +278,9 @@ app.get('/nyt', auth, async (req, res) => {
   try {
     let url;
     if (type === 'search') {
-      const params = new URLSearchParams({ ...rest, 'api-key': key });
+      const NYT_ALLOWED = new Set(['q','begin_date','end_date','sort','page','fq','facet_fields','facet_filter']);
+      const safeRest = Object.fromEntries(Object.entries(rest).filter(([k])=>NYT_ALLOWED.has(k)));
+      const params = new URLSearchParams({ ...safeRest, 'api-key': key });
       url = `https://api.nytimes.com/svc/search/v2/articlesearch.json?${params}`;
     } else {
       // top stories (default)
@@ -332,12 +336,14 @@ app.get('/newsapi', auth, async (req, res) => {
 });
 
 // ── /gdelt ───────────────────────────────────────────────────
+const GDELT_ALLOWED = new Set(['query','mode','maxrecords','timespan','startdatetime','enddatetime','sort','sourcecountry','sourcelang','theme','domain']);
 app.get('/gdelt', auth, async (req, res) => {
   const ck = `gdelt_${JSON.stringify(req.query)}`;
   const cached = getCached(ck);
   if (cached) return res.json(cached);
   try {
-    const params = new URLSearchParams({...req.query, format:'json'});
+    const safe = Object.fromEntries(Object.entries(req.query).filter(([k])=>GDELT_ALLOWED.has(k)));
+    const params = new URLSearchParams({...safe, format:'json'});
     const data = await fetchJSON(`https://api.gdeltproject.org/api/v2/doc/doc?${params}`);
     setCached(ck, data, 1_800_000);
     res.json(data);
@@ -604,12 +610,14 @@ app.get('/tension', auth, async (req, res) => {
 });
 
 // ── /polymarket ───────────────────────────────────────────────
+const POLY_ALLOWED = new Set(['limit','offset','active','closed','archived','tag_id','related_tags','liquidity_num_min','volume_num_min','start_date_min','end_date_min','closed_time_min','order','ascending']);
 app.get('/polymarket', auth, async (req, res) => {
   const ck = `poly_${JSON.stringify(req.query)}`;
   const cached = getCached(ck);
   if (cached) return res.json(cached);
   try {
-    const params = new URLSearchParams(req.query);
+    const safe = Object.fromEntries(Object.entries(req.query).filter(([k])=>POLY_ALLOWED.has(k)));
+    const params = new URLSearchParams(safe);
     const data = await fetchJSON(`https://gamma-api.polymarket.com/markets?${params}`);
     setCached(ck, data, 600_000);
     res.json(data);
